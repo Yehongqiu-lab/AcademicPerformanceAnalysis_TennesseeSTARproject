@@ -1,0 +1,493 @@
+---
+title: "Higher order model selection"
+author: "Yehong Qiu"
+date: "2024-12-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Data Pre-processing
+
+## Load the Data
+
+```{r}
+data = read.table("abalone.txt", header=FALSE, sep = ",")
+names(data) = c("Sex","Length","Diameter","Height","Whole_weight",
+                "Shucked_weight","Viscera_weight","Shell_weight","Rings")
+```
+
+## Data Transformation
+
+```{r}
+# Convert Categorical Variables to Factors
+data$Sex<- as.factor(data$Sex)
+
+# Create Feature AGE as response data
+data$Age = data$Rings + 1.5
+```
+
+```{r, dataS}
+dataS = data[,1:8]
+dataS$Age = data$Age
+```
+
+```{r, newdata}
+# Age being its inverse cubic root; Weight variables being their cubic root
+newdata = dataS
+newdata$Age = (dataS$Age)^(-1/3)
+newdata$Shucked_weight = (newdata$Shucked_weight)^(1/3)
+newdata$Viscera_weight = (newdata$Viscera_weight)^(1/3)
+newdata$Shell_weight = (newdata$Shell_weight)^(1/3)
+```
+
+
+### Fit the Model.1.1
+```{r, model.1.1}
+model.1.1 = lm(Age~.,data=newdata)
+```
+
+### Calculate SSEp,Square_Rp,Square_Rap,AICp,BICp, and Pressp (model.1.1)
+
+Compare with model.0.1-3, model.1.1 is better
+```{r}
+n=nrow(newdata)
+p_full=length(model.1.1$coefficients)
+sse_full=sum(model.1.1$residuals^2)
+aic_full=n*log(sse_full/n)+2*p_full
+bic_full = n*log(sse_full/n)+log(n)*p_full
+PRESS_p_full=sum((model.1.1$residuals/(1-influence(model.1.1)$hat))^2)
+
+p_full
+sse_full
+aic_full
+bic_full
+PRESS_p_full # not much larger than sse, not overfitting
+```
+
+### Calculate VIF
+strong multi-colinearity
+```{r}
+# VIF
+library(car)
+vif_values <- vif(model.1.1)
+
+vif_values
+```
+
+# Model Selection
+### data splitting
+```{r}
+set.seed(123)
+idx = sample(1:nrow(newdata), size=0.7*nrow(newdata), replace=FALSE)
+
+data_t = newdata[idx,]
+data_v = newdata[-idx,]
+
+
+library(fastDummies)
+data_t_with_dummies <- dummy_cols(data_t, select_columns = "Sex", remove_first_dummy = TRUE)
+data_t_with_dummies$Sex <- NULL
+data_t_with_dummies <- data_t_with_dummies[, c(9, 10, 1:8)]
+
+data_v_with_dummies <- dummy_cols(data_v, select_columns = "Sex", remove_first_dummy = TRUE)
+data_v_with_dummies$Sex <- NULL
+data_v_with_dummies <- data_v_with_dummies[, c(9, 10, 1:8)]
+```
+
+### criterion calculation function
+```{r}
+cri_stat <- function(model, ndata, flag) {
+  cri_sta_c = 0
+  n = ndata
+  mod_sum = summary(model)
+  if (flag == 1) {
+    p_m = as.integer(as.numeric(rownames(mod_sum$which))+1)
+    sse = mod_sum$rss
+    aic = n*log(sse/n)+2*p_m
+    bic = n*log(sse/n)+log(n)*p_m
+    cri_stat_c = cbind(mod_sum$which, p_m, sse, mod_sum$rsq, mod_sum$adjr2, aic, bic, mod_sum$cp)
+  }
+  else {
+    p_m = length(coef(model))
+    residuals <- resid(model)
+    sse <- sum(residuals^2)
+    tss <- sum((model$model[[1]] - mean(model$model[[1]]))^2)
+    rsq <- 1 - (sse / tss)
+    adjr2 <- 1 - ((1 - rsq) * (n - 1) / (n - p_m))
+    aic = n*log(sse/n)+2*p_m
+    bic = n*log(sse/n)+log(n)*p_m
+    PRESSp = sum((residuals / (1 - hatvalues(model)))^2)
+    cri_stat_c = cbind(p_m, sse, rsq, adjr2, aic, bic, PRESSp)
+  }
+  
+  return(cri_stat_c)
+}
+```
+
+## first-order effects
+```{r}
+library(leaps)
+sub_set = regsubsets(Age ~ ., data = data_t, nbest = 1, nvmax = 9, method = 'exhaustive', really.big=T)
+n = nrow(data_t)
+cri_sub = cri_stat(sub_set, n, flag=1)
+
+fit0 = lm(Age~1, data=data_t)
+fit0_cp = cri_stat(fit0, n, flag=0)[2]*(n-10)/cri_stat(model.1.1, nrow(model.1.1$model), flag=0)[2]-(n-2*10)
+none = c(1, rep(0, 9), cri_stat(fit0, n, flag=0)[1:6], fit0_cp)
+
+cri_sub = rbind(none, cri_sub)
+colnames(cri_sub) = c(colnames(summary(sub_set)$which), "p_m", "sse", "R^2", "R^2_a", "aic", "bic", "Cp")
+cri_sub
+```
+Best model:
+Based on SSE or R^2: model 9
+Based on R^2_a, Cp, aic: model 7
+Based on bic: model 6
+
+```{r}
+library(MASS)
+fit0=lm(Age~1, data=data_t_with_dummies)
+fit1=lm(Age~., data=data_t_with_dummies)
+model.1.2 = stepAIC(fit0, scope=list(upper=fit1, lower=~1), trace=0, direction='both', k=2)
+model.1.2$anova
+plot(model.1.2, which=1:2)
+```
+
+```{r}
+cri_stat(model.1.2, nrow(model.1.2$model), flag=0)
+```
+
+## Second-Order Model Selection
+
+```{r}
+library(fastDummies)
+newdata_with_dummies <- dummy_cols(newdata, select_columns = "Sex", remove_first_dummy = TRUE)
+newdata_with_dummies$Sex <- NULL
+newdata_with_dummies <- newdata_with_dummies[, c(9, 10, 1:8)]
+newdata.epd <- newdata_with_dummies[,c(1,4:10)] #only choose variables in model.1.2
+```
+
+```{r}
+
+# second-order terms for quantitative variables
+tmp = newdata.epd
+n = ncol(newdata.epd)
+for (i in 1:ncol(tmp[2:(n-1)])) {
+  col_name <- names(tmp[2:(n-1)])[i]
+  newdata.epd[[paste0(col_name, "2")]] <- tmp[[col_name]]^2
+}
+
+# interaction terms
+for (i in 1:(ncol(tmp[1:(n-1)]) - 1)) {
+  for (j in (i + 1):ncol(tmp[1:(n-1)])) {
+    col_name_i <- names(tmp[1:(n-1)])[i]
+    col_name_j <- names(tmp[1:(n-1)])[j]
+    newdata.epd[[paste0(col_name_i, "x", col_name_j)]] <- tmp[1:(n-1)][[col_name_i]] * tmp[1:(n-1)][[col_name_j]]
+  }
+}
+newdata.epd <- newdata.epd[, c(1:7, 9:35, 8)]
+```
+```{r}
+data.epd_t = newdata.epd[idx,]
+data.epd_v = newdata.epd[-idx,]
+```
+
+```{r}
+model.2 = lm(Age~., data=data.epd_t)
+anova(model.2)["Residuals",1:3]
+```
+
+```{r, model.2.1}
+fit0=lm(Age~1, data=data.epd_t)
+model.2.1 = stepAIC(fit0, scope=list(upper=model.2, lower=~1), trace=0, direction='both', k=2)
+```
+
+```{r, model.2.2}
+model.2.2 = stepAIC(fit0, scope=list(upper=model.2, lower=~1), trace=0, direction='forward', k=2)
+```
+
+```{r, model.2.3}
+model.2.3 = stepAIC(model.2, scope=list(upper=model.2, lower=~1), trace=0, direction='backward', k=2)
+```
+
+```{r}
+cri_stat(model.1.2, nrow(model.1.2$model), flag=0)
+cri_stat(model.2.3, nrow(model.2.3$model), flag=0)
+cri_stat(model.2.2, nrow(model.2.2$model), flag=0)
+cri_stat(model.2.1, nrow(model.2.1$model), flag=0)
+```
+
+## Model Validation: model.1.2 v.s. model.2.1, model.2.2, and model.2.3
+```{r, internal validation}
+n = nrow(data.epd_t)
+# use model.2 as the full model
+sigma_sq = anova(model.2)["Residuals", 3]
+# calculate Cp
+Cp= rep(0,4)
+Cp[1] = anova(model.1.2)["Residuals",2]/sigma_sq - (n - 2*length(model.1.2$coefficients))
+Cp[2] = anova(model.2.1)["Residuals",2]/sigma_sq - (n - 2*length(model.2.1$coefficients))
+Cp[3] = anova(model.2.2)["Residuals",2]/sigma_sq - (n - 2*length(model.2.2$coefficients))
+Cp[4] = anova(model.2.3)["Residuals",2]/sigma_sq - (n - 2*length(model.2.3$coefficients))
+names(Cp) = c("model.1.2", "model.2.1", "model.2.2", "model.2.3")
+p = c(length(model.1.2$coefficients), length(model.2.1$coefficients), length(model.2.2$coefficients), length(model.2.3$coefficients))
+names(p) = c("model.1.2", "model.2.1", "model.2.2","model.2.3")
+
+Cp
+p
+```
+
+```{r, external validation}
+ext_vali <- function(mod_t, data_v) {
+  n = ncol(data_v)
+  mod_v = lm(mod_t, data = data_v)
+  # print("summary on training data:")
+  # print(summary(mod_t))
+  # print("summary on validation data:")
+  # print(summary(mod_v))
+  
+  del_pc_para = round(abs(coef(mod_t) - coef(mod_v))/abs(coef(mod_t))*100, 3)
+  sd = summary(mod_t)$coefficients[,"Std. Error"]
+  sd_v = summary(mod_v)$coefficients[,"Std. Error"]
+  del_pc_err = round(abs(sd - sd_v) / sd *100, 3)
+  
+  mspe = rep(0, 3)
+  pred = predict.lm(mod_t, data_v[, -n])
+  mspe[1] = mean((pred - data_v[, n])^2)
+  mspe[2] = cri_stat(mod_t, nrow(mod_t$model), flag=0)[7] / nrow(mod_t$model)
+  mspe[3] = cri_stat(mod_t, nrow(mod_t$model), flag=0)[2] / nrow(mod_t$model)
+  names(mspe) = c("mspe", "PRESSp/n", "sse/n")
+  # print("relative percentage change in parameter estimates:")
+  # print(del_pc_para)
+  # print("relative percentage change in std err:")
+  # print(del_pc_err)
+  print(mspe)
+}
+```
+
+```{r}
+ext_vali(model.1.2, data_v_with_dummies)
+ext_vali(model.2.1, data.epd_v)
+ext_vali(model.2.2, data.epd_v)
+ext_vali(model.2.3, data.epd_v)
+```
+
+
+## Ridge and PCR on Model.2
+```{r}
+# Estimate RMSPE on ols
+Age.vali.ols = predict(model.2, data.epd_v)
+
+c(sqrt(mean((model.2$fitted.values - data.epd_t$Age)^2)), sqrt(mean((Age.vali.ols - data.epd_v$Age)^2)))
+```
+
+```{r}
+model.2.ridge = lm.ridge(Age~., data=data.epd_t, 
+                  lambda = exp(seq(log(1e0),log(1e-2),length.out = 1000)))
+lambda.GCV = model.2.ridge$lambda[which.min(model.2.ridge$GCV)]
+plot(model.2.ridge$lambda, model.2.ridge$GCV, xlab = expression(lambda), ylab='GCV', type='l')
+abline(v=lambda.GCV, lty=2)
+```
+
+```{r}
+matplot(model.2.ridge$lambda, t(model.2.ridge$coef), type='l', lty=1, 
+        xlab=expression(lambda), ylab=expression(hat(beta)))
+abline(v=lambda.GCV, lty=2) ##GCV
+abline(v=0, lty=1) ##OLS
+```
+
+```{r}
+### RMSPE of `model.2.ridge`
+ncol = 35
+coef.GCV=model.2.ridge$coef[, which.min(model.2.ridge$GCV)]
+X.train=scale(data.epd_t[,1:(ncol-1)], center=model.2.ridge$xm, scale=model.2.ridge$scales)
+Yh.train=X.train%*%coef.GCV+model.2.ridge$ym
+X.test=scale(data.epd_v[,1:(ncol-1)], center=model.2.ridge$xm, scale=model.2.ridge$scales)
+Yh.test=X.test%*%coef.GCV+model.2.ridge$ym
+
+c(sqrt(mean((Yh.train-data.epd_t$Age)^2)), sqrt(mean((Yh.test-data.epd_v$Age)^2)))
+```
+
+### Principle Component Analysis (PCA)
+
+```{r}
+par(mfrow=c(1,2))
+abapca<-prcomp(data.epd_t[,1:(ncol-1)], center=TRUE, scale=TRUE)
+plot(abapca$sdev, type='p', xlab="index", ylab="singular values", log="x", main="Scree Plot ")
+plot(cumsum((abapca$sdev)^2)/sum((abapca$sdev)^2), type='p', xlab="index", ylab="cumulative percentage", log="x", main="Cumulative Percentage 
+     of Variance Explained by PC")
+print(cumsum((abapca$sdev)^2)/sum((abapca$sdev)^2))
+```
+
+```{r}
+par(mfrow=c(1,1))
+#plot PC directions/loadings that generate the first five principal components against the X index (frequency index)
+matplot(1:(ncol-1), abapca$rotation[,1:10], type='l', xlab="frequency index", ylab="loading")
+legend('topright', legend=1:10, lty=1:10, col=1:10)
+```
+
+### Principle Component Regression (PCR)
+
+```{r}
+library(pls)  #pcr 
+k.max=ncol-1   
+#fit models with 1,2,.., k.max components successively; 
+#standardize X and center Y; conduct "CV" (5 folds, consecutive segments)
+#fitted values and coefficients (of the standardized X) of these k.max models are returned;
+aba.pcr=pcr(Age~., data=data.epd_t, ncomp=k.max, center=TRUE, scale=TRUE,  validation="CV", segments = 5, segment.type = "consecutive")
+
+validationplot(aba.pcr, main="PCR CV plot")
+```
+
+
+```{r}
+### plot fitted coefficients under the original scales
+par(mfrow=c(2,2))
+plot(coefficients(model.2), xlab="frequency index",ylab="fitted coefficient", main="OLS", type='l')
+plot(model.2.ridge$coef[, which.min(model.2.ridge$GCV)]/model.2.ridge$scales, xlab="frequency index", ylab="fitted coefficient", main="ridge (with GCV)", type='l')
+
+plot(coef(aba.pcr, ncomp = 10)/aba.pcr$scale,xlab="frequency index", ylab="fitted coefficient", main="PCR: 10 components", type='l')
+
+```
+
+### Comparison between OLS, Ridge, and PCR
+```{r}
+rmspe<-function(y, yh) sqrt(mean((y-yh)^2))
+
+##OLS 
+c(rmspe(data.epd_t$Age, model.2$fitted.values),rmspe(data.epd_v$Age, predict(model.2, data.epd_v)))
+##Ridge
+coef.GCV=model.2.ridge$coef[, which.min(model.2.ridge$GCV)]
+X.train=scale(data.epd_t[,1:(ncol-1)], center=model.2.ridge$xm, scale=model.2.ridge$scales)
+Yh.train=X.train%*%coef.GCV+model.2.ridge$ym
+X.test=scale(data.epd_v[,1:(ncol-1)], center=model.2.ridge$xm, scale=model.2.ridge$scales)
+Yh.test=X.test%*%coef.GCV+model.2.ridge$ym
+c(rmspe(data_t$Age, Yh.train), rmspe(data_v$Age, Yh.test))
+##PCR
+c(rmspe(data.epd_t$Age, predict(aba.pcr, ncomp=10)), rmspe(data.epd_v$Age, predict(aba.pcr, data.epd_v, ncomp=10)))
+```
+
+### Why Ridge inefficient:
+
+```{r}
+### the effective number of X variables in the ridge model with GCV selected lambda is:
+lambda.GCV=model.2.ridge$lambda[which.min(model.2.ridge$GCV)]
+S= X.train%*%solve(t(X.train)%*%X.train+lambda.GCV*diag(ncol-1), t(X.train)) ## the smoothing matrix 
+sum(diag(S)) ## effective number
+```
+The effective number (27.99) still close to 35, which means the penalization of ridge is very slight.
+
+
+
+```{r}
+plot(diag(solve(t(X.train)%*%X.train))/diag(solve(t(X.train)%*%X.train+lambda.GCV*diag(ncol-1), t(X.train)%*%X.train)%*%solve(t(X.train)%*%X.train+lambda.GCV*diag(ncol-1))), ylab="Shrinkage", log="y")
+abline(h=1, lty=2)
+```
+
+## Model Diagnositics
+
+```{r}
+### model.2.1
+model.2.1.final = lm(model.2.1, data=newdata.epd)
+summary(model.2.1.final)
+anova(model.2.1.final)
+par(mfrow=c(2,2))
+plot(model.2.1.final, which=1:5)
+model.2.f = lm(model.2, data=newdata.epd)
+
+sigma_sq = anova(model.2.f)["Residuals", 3]
+
+cc = cri_stat(model.2.1.final, nrow(newdata.epd), flag=0)
+Cp = cc[2] /sigma_sq - (nrow(newdata.epd) - 2*cc[1])
+print(cbind(cri_stat(model.2.1.final, nrow(newdata.epd), flag=0), Cp))
+```
+
+```{r}
+# check outliers in X, and Y
+ns = nrow(newdata.epd)
+res = residuals(model.2.1.final) # residuals of the final model
+p = length(model.2.1.final$coefficients)
+h1 = influence(model.2.1.final)$hat
+d_res_std = studres(model.2.1.final) # studentized deleted residuals
+qt(1-0.1/(2*ns), ns-1-p) # bonferronis thresh hold
+```
+
+```{r}
+# outliers in Y:
+idx_Y =  as.vector(which(abs(d_res_std) >= qt(1-0.1/(2*ns), ns-1-p)))
+```
+
+```{r}
+# outliers in X:
+idx_X = as.vector(which(h1 > (2*p/ns)))
+```
+
+```{r}
+per_average = function(model, dataset, idx){
+  ns = nrow(dataset)
+  model2 = lm(model, data = dataset[-idx,])
+  f1 = fitted(model)
+  f2 = fitted(model2)
+  SUM = sum(abs((f1[-idx]-f2)/f1[-idx]))
+  SUM = SUM + abs((f1[idx]- predict(model, newdata = dataset[idx,]))/f1[idx])
+  return(SUM/ns)
+}
+
+per_average(model.2.1.final, newdata.epd, 2052)
+per_average(model.2.1.final, newdata.epd, c(2052, 3997))
+per_average(model.2.1.final, newdata.epd, c(2052, 2628))
+per_average(model.2.1.final, newdata.epd, c(3997, 2628))
+per_average(model.2.1.final, newdata.epd, c(2052, 3997, 2628))
+```
+
+```{r}
+### perform PCR with ncomp=10 on the entire dataset
+library(pls)
+set.seed(123)
+pcr_model <- pcr(Age ~ ., data = newdata.epd, scale = TRUE, validation = "CV")
+
+ncomp <- 10
+pcr_pred <- predict(pcr_model, ncomp = ncomp)
+
+# Residuals
+residuals_pcr <- newdata.epd$Age - predict(pcr_model, ncomp = ncomp)
+# Fitted values
+fitted_pcr <- predict(pcr_model, ncomp = ncomp)
+
+# Plot
+par(mfrow=c(1,2))
+plot(fitted_pcr, residuals_pcr, 
+     xlab = "Fitted Values", 
+     ylab = "Residuals", 
+     main = "Residuals vs Fitted Values")
+abline(h = 0, col = "red", lty = 2)
+
+qqnorm(residuals_pcr, main = "QQ Plot of Residuals")
+qqline(residuals_pcr, col = "red", lty = 2)
+```
+
+```{r}
+SSE <- sum(residuals_pcr^2)
+TSS <- sum((newdata.epd$Age - mean(newdata.epd$Age))^2)  # Total sum of squares
+R2 <- 1 - (SSE / TSS)
+
+# Adjusted R^2
+n <- nrow(newdata.epd)  # Number of observations
+p <- ncomp+1            # Number of components
+adjR2 <- 1 - ((1 - R2) * (n - 1) / (n - p))
+
+sigma2 <- SSE / n     # Residual variance estimate
+AIC <- n * log(sigma2) + 2 * p
+BIC <- n * log(sigma2) + log(n) * p
+PRESSp <- sum(pcr_model$validation$PRESS[, ncomp])
+# Cp
+model.2.f = lm(model.2, data=newdata.epd)
+sigma_sq = anova(model.2.f)["Residuals", 3]
+Cp = SSE /sigma_sq - (n - 2*p)
+
+cc = c(p, R2, adjR2, SSE, AIC, BIC, PRESSp, Cp)
+names(cc) = c("p","R2", "adjR2", "SSE", "AIC", "BIC", "RRESSp", "Cp")
+print(cc)
+```
