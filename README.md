@@ -1,0 +1,2 @@
+- Assessed impact of class size on math scores using ANOVA, mixed-effects, and causal inference frameworks.
+- Clarified limits of causal claims in observational studies settings; reframed conclusions as associations with robustness checks across model variants.
